@@ -4,10 +4,11 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use volo::FastStr;
 use volo_gen::mini_redis::{RedisRequest, RequestType};
+use mini_redis::{DEFAULT_ADDR,BASE_REQUEST};
 
 lazy_static! {
     static ref CLIENT: volo_gen::mini_redis::RedisServiceClient = {
-        let addr: SocketAddr = "127.0.0.1:8087".parse().unwrap();
+        let addr: SocketAddr = DEFAULT_ADDR.parse().unwrap();
         volo_gen::mini_redis::RedisServiceClientBuilder::new("redis")
             // .layer_outer(LogLayer)
             .layer_outer(FilterLayer)
@@ -19,14 +20,7 @@ lazy_static! {
 async fn main() {
     tracing_subscriber::fmt::init();
     let mut args: Vec<String> = std::env::args().collect();
-    let base_request = RedisRequest {
-        key: None,
-        value: None,
-        request_type: RequestType::Ping,
-        expire_time: None,
-        channels: None,
-        block: None,
-    };
+
     let req = match args[1].to_lowercase().as_str() {
         "set" => RedisRequest {
             key: Some(FastStr::from(Arc::new(args.remove(2)))),
@@ -37,19 +31,19 @@ async fn main() {
                 2 => None,
                 _ => panic!("invalid args"),
             },
-            ..base_request
+            ..BASE_REQUEST.clone()
         },
         "get" => RedisRequest {
             key: Some(FastStr::from(Arc::new(args.remove(2)))),
             request_type: RequestType::Get,
-            ..base_request
+            ..BASE_REQUEST.clone()
         },
         "del" => RedisRequest {
             key: Some(FastStr::from(Arc::new(args.remove(2)))),
             request_type: RequestType::Del,
-            ..base_request
+            ..BASE_REQUEST.clone()
         },
-        "ping" => RedisRequest { ..base_request },
+        "ping" => RedisRequest { ..BASE_REQUEST.clone() },
         "subscribe" => RedisRequest {
             request_type: RequestType::Subscribe,
             channels: Some(
@@ -58,13 +52,13 @@ async fn main() {
                     .collect(),
             ),
             block: Some(false),
-            ..base_request
+            ..BASE_REQUEST.clone()
         },
         "publish" => RedisRequest {
             value: Some(FastStr::from(Arc::new(args.remove(3)))),
             request_type: RequestType::Publish,
             channels: Some(vec![FastStr::from(Arc::new(args.remove(2)))]),
-            ..base_request
+            ..BASE_REQUEST.clone()
         },
         _ => {
             panic!("unknown command");

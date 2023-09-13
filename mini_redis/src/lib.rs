@@ -6,6 +6,16 @@ use std::sync::Mutex;
 use tokio::sync::broadcast;
 use tracing::info;
 use volo::FastStr;
+pub static DEFAULT_ADDR: &str = "127.0.0.1:8080";
+pub static BASE_REQUEST: volo_gen::mini_redis::RedisRequest = volo_gen::mini_redis::RedisRequest {
+    key: None,
+    value: None,
+    request_type: RequestType::Ping,
+    expire_time: None,
+    channels: None,
+    block: None,
+};
+
 pub struct S {
     pub map: Arc<Mutex<HashMap<String, String>>>,
     pub channels: Mutex<HashMap<String, broadcast::Sender<String>>>,

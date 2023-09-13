@@ -1,18 +1,29 @@
 use std::net::SocketAddr;
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, State, Query},
     http::StatusCode,
-    response::{Html, IntoResponse, Response},
     routing::get,
-    Form, Router,
+    Router,
+    response,
 };
-use rpcdemo::DEFAULT_ADDR;
+use mini_redis::{DEFAULT_ADDR, FilterLayer, BASE_REQUEST};
 use serde::Deserialize;
-use volo_gen::demo::{DemoServiceClient, DemoServiceClientBuilder};
+use std::sync::Arc;
+use volo_gen::mini_redis::{RedisServiceClient, RedisRequest,RequestType, RedisResponse};
+use faststr::FastStr;
+type RpcClient = RedisServiceClient;
 
-type RpcClient = DemoServiceClient;
-type RpcClientBuilder = DemoServiceClientBuilder;
+async fn get_response(req: RedisRequest, rpc_cli: &mut RpcClient) -> Option<FastStr> {
+    rpc_cli.redis_command(req).await.unwrap_or_else(|x|  RedisResponse{ 
+        value: Some(FastStr::from(match x{
+            volo_thrift::ResponseError::Application(err) => err.message,
+            _ => "Internal Server Error".to_string(),
+            })),
+        response_type: volo_gen::mini_redis::ResponseType::Print,
+    }).value
+}
+
 
 #[tokio::main]
 async fn main() {
@@ -20,7 +31,11 @@ async fn main() {
     tracing_subscriber::fmt::init();
 
     let addr: SocketAddr = DEFAULT_ADDR.parse().unwrap();
-    let rpc_cli = RpcClientBuilder::new("rpcdemo").address(addr).build();
+    let rpc_cli =volo_gen::mini_redis::RedisServiceClientBuilder::new("redis")
+        // .layer_outer(LogLayer)
+        .layer_outer(FilterLayer)
+        .address(addr)
+        .build();
 
     // build the application with router
     let app = Router::new()
@@ -28,9 +43,9 @@ async fn main() {
         .route("/get/:keys", get(get_key).with_state(rpc_cli.clone()))
         .route(
             "/set",
-            get(show_set_form).post(set_key).with_state(rpc_cli.clone()),
+            get(set_key).with_state(rpc_cli.clone()),
         )
-        .route("/del", get(show_del_form).post(del_key).with_state(rpc_cli));
+        .route("/del/:keys", get(del_key).with_state(rpc_cli));
 
     // run it with hyper
     let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
@@ -46,70 +61,57 @@ async fn ping() -> (StatusCode, &'static str) {
 }
 
 /// Get a key
-async fn get_key(Path(key): Path<String>, State(rpc_cli): State<RpcClient>) -> Response {
-    if rpc_cli.get(key.into()).await.unwrap() {
-        (StatusCode::OK, "found").into_response()
-    } else {
-        (StatusCode::NOT_FOUND, "not found").into_response()
+async fn get_key(Path(key): Path<String>, State(mut rpc_cli): State<RpcClient>) -> Result<response::Json<String>, StatusCode> {
+    let req = RedisRequest {
+        key: Some(FastStr::from(Arc::new(key))),
+        request_type: RequestType::Get,
+        ..BASE_REQUEST.clone()
+    };
+    match get_response(req, &mut rpc_cli).await {
+        Some(value) => match value.as_str(){
+            "nil" => Ok(response::Json("nil".to_string())),
+            _ => Ok(response::Json(value.into_string())),
+        },
+        None => Ok(response::Json("nil".to_string())),
     }
 }
 
-#[derive(Deserialize, Debug)]
-struct FormKey {
+#[derive(Deserialize)]
+struct KVPair {
     key: String,
+    value: String,
 }
 
-/// Show the form for set a key
-async fn show_set_form() -> Html<&'static str> {
-    Html(
-        r#"
-        <!doctype html>
-        <html>
-            <head></head>
-            <body>
-                <form action="/set" method="post">
-                    <label for="key">
-                        Enter key:
-                        <input type="text" name="key">
-                    </label>
-                    <input type="submit" value="Subscribe!">
-                </form>
-            </body>
-        </html>
-        "#,
-    )
-}
-
-/// Set a key
-async fn set_key(State(rpc_cli): State<RpcClient>, Form(setkey): Form<FormKey>) -> Response {
-    rpc_cli.set(setkey.key.into()).await.unwrap();
-    (StatusCode::OK, "set ok").into_response()
-}
-
-async fn show_del_form() -> Html<&'static str> {
-    Html(
-        r#"
-        <!doctype html>
-        <html>
-            <head></head>
-            <body>
-                <form action="/del" method="post">
-                    <label for="key">
-                        Enter key:
-                        <input type="text" name="key">
-                    </label>
-                    <input type="submit" value="Subscribe!">
-                </form>
-            </body>
-        </html>
-        "#,
-    )
+async fn set_key(State(mut rpc_cli): State<RpcClient>, Query(params): Query<KVPair>) -> Result<response::Json<String>,StatusCode> {
+    let req = RedisRequest {
+        key: Some(FastStr::from(Arc::new(params.key))),
+        value: Some(FastStr::from(Arc::new(params.value))),
+        request_type: RequestType::Set,
+        ..BASE_REQUEST.clone()
+    };
+    match get_response(req, &mut rpc_cli).await {
+        Some(value) => Ok(response::Json(value.into_string())),
+        None => Err(StatusCode::INTERNAL_SERVER_ERROR),
+    }
 }
 
 async fn del_key(
-    State(rpc_cli): State<RpcClient>,
-    Form(delkey): Form<FormKey>,
-) -> (StatusCode, &'static str) {
-    rpc_cli.del(delkey.key.into()).await.unwrap();
-    (StatusCode::OK, "del ok")
+    State(mut rpc_cli): State<RpcClient>,
+    Path(key): Path<String>,
+) -> Result<response::Json<String>, StatusCode> {
+    let req = RedisRequest {
+        key: Some(FastStr::from(Arc::new(key))),
+        request_type: RequestType::Del,
+        ..BASE_REQUEST.clone()
+    };
+    match get_response(req, &mut rpc_cli).await {
+        Some(value) => {
+            match value.as_str() {
+                "Ok" => Ok(response::Json(value.into_string())),
+                "nil" => Ok(response::Json("nil".to_string())),
+                _ => Err(StatusCode::INTERNAL_SERVER_ERROR),
+            }
+        },
+        None => Err(StatusCode::NOT_FOUND),
+    }
 }
